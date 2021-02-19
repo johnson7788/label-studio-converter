@@ -20,7 +20,6 @@ from label_studio_converter.utils import (
 from label_studio_converter import brush
 from label_studio_converter.audio import convert_to_asr_json_manifest
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +38,7 @@ class Format(Enum):
     BRUSH_TO_NUMPY = 8
     BRUSH_TO_PNG = 9
     ASR_MANIFEST = 10
+    YOLO = 11
 
     def __str__(self):
         return self.name
@@ -88,6 +88,10 @@ class Converter(object):
         elif format == Format.COCO:
             image_dir = kwargs.get('image_dir')
             self.convert_to_coco(input_data, output_data, output_image_dir=image_dir, is_dir=is_dir)
+        elif format == Format.YOLO:
+            image_dir = kwargs.get('image_dir')
+            label_dir = kwargs.get('label_dir')
+            self.convert_to_yolo(input_data, output_data, output_image_dir=image_dir, output_label_dir=label_dir,is_dir=is_dir)
         elif format == Format.VOC:
             image_dir = kwargs.get('image_dir')
             self.convert_to_voc(input_data, output_data, output_image_dir=image_dir, is_dir=is_dir)
@@ -172,12 +176,13 @@ class Converter(object):
         result = []
         if 'completions' in d:
             # get last not skipped completion and make result from it
-            tmp = list(filter(lambda x: not (x.get('skipped', False) or x.get('was_cancelled', False)), d['completions']))
+            tmp = list(
+                filter(lambda x: not (x.get('skipped', False) or x.get('was_cancelled', False)), d['completions']))
             if len(tmp) > 0:
                 result = sorted(tmp, key=lambda x: x.get('created_at', 0), reverse=True)[0]['result']
             else:
                 return None
-            
+
         elif 'result' in d:
             result = d['result']
 
@@ -297,7 +302,8 @@ class Converter(object):
             image_path = item['input'][data_key]
             if not os.path.exists(image_path):
                 try:
-                    image_path = download(image_path, output_image_dir, project_dir=self.project_dir, return_relative_path=True)
+                    image_path = download(image_path, output_image_dir, project_dir=self.project_dir,
+                                          return_relative_path=True)
                 except:
                     logger.error('Unable to download {image_path}. The item {item} will be skipped'.format(
                         image_path=image_path, item=item
@@ -379,6 +385,83 @@ class Converter(object):
                 }
             }, fout, indent=2)
 
+    def convert_to_yolo(self, input_data, output_dir, output_image_dir=None, output_label_dir=None, is_dir=True):
+        self._check_format(Format.YOLO)
+        ensure_dir(output_dir)
+        notes_file = os.path.join(output_dir, 'notes.json')
+        if output_image_dir is not None:
+            ensure_dir(output_image_dir)
+        else:
+            output_image_dir = os.path.join(output_dir, 'images')
+            os.makedirs(output_image_dir, exist_ok=True)
+        if output_label_dir is not None:
+            ensure_dir(output_label_dir)
+        else:
+            output_label_dir = os.path.join(output_dir, 'labels')
+            os.makedirs(output_label_dir, exist_ok=True)
+        categories = []
+        category_name_to_id = {}
+        data_key = self._data_keys[0]
+        item_iterator = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
+        for item_idx, item in enumerate(item_iterator):
+            if not item['output']:
+                logger.warning('No completions found for item #' + str(item_idx))
+                continue
+            image_path = item['input'][data_key]
+            if not os.path.exists(image_path):
+                try:
+                    image_path = download(image_path, output_image_dir, project_dir=self.project_dir,
+                                          return_relative_path=True)
+                except:
+                    logger.error('Unable to download {image_path}. The item {item} will be skipped'.format(
+                        image_path=image_path, item=item
+                    ), exc_info=True)
+            labels = next(iter(item['output'].values()))
+            if len(labels) == 0:
+                logger.error('Empty bboxes.')
+                continue
+            width, height = labels[0]['original_width'], labels[0]['original_height']
+            label_path = os.path.join(output_label_dir, os.path.splitext(os.path.basename(image_path))[0]+'.txt')
+            annotations =[]
+            for label in labels:
+                if 'rectanglelabels' in label:
+                    category_name = label['rectanglelabels'][0]
+                else:
+                    raise ValueError("Unknown label type")
+                if category_name not in category_name_to_id:
+                    category_id = len(categories)
+                    category_name_to_id[category_name] = category_id
+                    categories.append({
+                        'id': category_id,
+                        'name': category_name
+                    })
+                category_id = category_name_to_id[category_name]
+
+                if "rectanglelabels" in label:
+                    x = int(label['x'] / 100 * width)
+                    y = int(label['y'] / 100 * height)
+                    w = int(label['width'] / 100 * width)
+                    h = int(label['height'] / 100 * height)
+                    annotations.append([category_id, x, y, w, h])
+                else:
+                    raise ValueError("Unknown label type")
+            with open(label_path, 'w') as f:
+                for annotation in annotations:
+                    for idx, l in enumerate(annotation):
+                        if idx == len(annotation) -1:
+                            f.write(f"{l}\n")
+                        else:
+                            f.write(f"{l}\t")
+        with io.open(notes_file, mode='w', encoding='utf8') as fout:
+            json.dump({
+                'categories': categories,
+                'info': {
+                    'year': datetime.now().year,
+                    'version': '1.0',
+                    'contributor': 'Label Studio'
+                }
+            }, fout, indent=2)
+
     def convert_to_voc(self, input_data, output_dir, output_image_dir=None, is_dir=True):
 
         ensure_dir(output_dir)
@@ -408,7 +491,8 @@ class Converter(object):
                 os.makedirs(annotations_dir)
             if not os.path.exists(image_path):
                 try:
-                    image_path = download(image_path, output_image_dir, project_dir=self.project_dir, return_relative_path=True)
+                    image_path = download(image_path, output_image_dir, project_dir=self.project_dir,
+                                          return_relative_path=True)
                 except:
                     logger.error('Unable to download {image_path}. The item {item} will be skipped'.format(
                         image_path=image_path, item=item), exc_info=True)
@@ -450,7 +534,6 @@ class Converter(object):
             create_child_node(doc, 'depth', str(channels), size_node)
             root_node.appendChild(size_node)
             create_child_node(doc, 'segmented', '0', root_node)
-
 
             for bbox in bboxes:
                 name = bbox['rectanglelabels'][0]
