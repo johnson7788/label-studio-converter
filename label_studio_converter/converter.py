@@ -389,6 +389,7 @@ class Converter(object):
         self._check_format(Format.YOLO)
         ensure_dir(output_dir)
         notes_file = os.path.join(output_dir, 'notes.json')
+        class_file = os.path.join(output_dir, 'classes.txt')
         if output_image_dir is not None:
             ensure_dir(output_image_dir)
         else:
@@ -438,10 +439,10 @@ class Converter(object):
                 category_id = category_name_to_id[category_name]
 
                 if "rectanglelabels" in label:
-                    x = int(label['x'] / 100 * width)
-                    y = int(label['y'] / 100 * height)
-                    w = int(label['width'] / 100 * width)
-                    h = int(label['height'] / 100 * height)
+                    x = (label['x'] + label['width']/2) / 100
+                    y = (label['y'] + label['height']/2) / 100
+                    w = label['width'] / 100
+                    h = label['height'] / 100
                     annotations.append([category_id, x, y, w, h])
                 else:
                     raise ValueError("Unknown label type")
@@ -451,7 +452,10 @@ class Converter(object):
                         if idx == len(annotation) -1:
                             f.write(f"{l}\n")
                         else:
-                            f.write(f"{l}\t")
+                            f.write(f"{l} ")
+        with open(class_file, 'w', encoding='utf8') as f:
+            for c in categories:
+                f.write(c['name']+'\n')
         with io.open(notes_file, mode='w', encoding='utf8') as fout:
             json.dump({
                 'categories': categories,
