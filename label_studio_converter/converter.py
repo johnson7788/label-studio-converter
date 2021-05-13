@@ -6,6 +6,7 @@ import pandas as pd
 import xml.dom
 import xml.dom.minidom
 
+from shutil import copy2
 from enum import Enum
 from datetime import datetime
 from glob import glob
@@ -53,8 +54,84 @@ class Format(Enum):
 
 class Converter(object):
 
-    def __init__(self, config, project_dir, output_tags=None):
+    _FORMAT_INFO = {
+        Format.JSON: {
+            'title': 'JSON',
+            'description': "List of items in raw JSON format stored in one JSON file. Use to export both the data "
+                           "and the annotations for a dataset. It's Label Studio Common Format",
+            'link': 'https://labelstud.io/guide/export.html#JSON'
+        },
+        Format.JSON_MIN: {
+            'title': 'JSON-MIN',
+            'description': 'List of items where only "from_name", "to_name" values from the raw JSON format are '
+                           'exported. Use to export only the annotations for a dataset.',
+            'link': 'https://labelstud.io/guide/export.html#JSON-MIN',
+        },
+        Format.CSV: {
+            'title': 'CSV',
+            'description': 'Results are stored as comma-separated values with the column names specified by the '
+                           'values of the "from_name" and "to_name" fields.',
+            'link': 'https://labelstud.io/guide/export.html#CSV'
+        },
+        Format.TSV: {
+            'title': 'TSV',
+            'description': 'Results are stored in tab-separated tabular file with column names specified by '
+                           '"from_name" "to_name" values',
+            'link': 'https://labelstud.io/guide/export.html#TSV'
+        },
+        Format.CONLL2003: {
+            'title': 'CONLL2003',
+            'description': 'Popular format used for the CoNLL-2003 named entity recognition challenge.',
+            'link': 'https://labelstud.io/guide/export.html#CONLL2003',
+            'tags': ['sequence labeling', 'text tagging', 'named entity recognition']
+        },
+        Format.COCO: {
+            'title': 'COCO',
+            'description': 'Popular machine learning format used by the COCO dataset for object detection and image '
+                           'segmentation tasks with polygons and rectangles.',
+            'link': 'https://labelstud.io/guide/export.html#COCO',
+            'tags': ['image segmentation', 'object detection']
+        },
+        Format.VOC: {
+            'title': 'Pascal VOC XML',
+            'description': 'Popular XML format used for object detection and polygon image segmentation tasks.',
+            'link': 'https://labelstud.io/guide/export.html#Pascal-VOC-XML',
+            'tags': ['image segmentation', 'object detection']
+        },
+        Format.YOLO: {
+            'title': 'YOLO',
+            'description': 'Popular TXT format is created for each image file. Each txt file contains annotations for '
+                           'the corresponding image file, that is object class, object coordinates, height & width.',
+            'link': 'https://labelstud.io/guide/export.html#YOLO',
+            'tags': ['image segmentation', 'object detection']
+        },
+        Format.BRUSH_TO_NUMPY: {
+            'title': 'Brush labels to NumPy',
+            'description': 'Export your brush labels as NumPy 2d arrays. Each label outputs as one image.',
+            'link': 'https://labelstud.io/guide/export.html#Brush-labels-to-NumPy-amp-PNG',
+            'tags': ['image segmentation']
+        },
+        Format.BRUSH_TO_PNG: {
+            'title': 'Brush labels to PNG',
+            'description': 'Export your brush labels as PNG images. Each label outputs as one image.',
+            'link': 'https://labelstud.io/guide/export.html#Brush-labels-to-NumPy-amp-PNG',
+            'tags': ['image segmentation']
+        },
+        Format.ASR_MANIFEST: {
+            'title': 'ASR Manifest',
+            'description': 'Export audio transcription labels for automatic speech recognition as the JSON manifest '
+                           'format expected by NVIDIA NeMo models.',
+            'link': 'https://labelstud.io/guide/export.html#ASR-MANIFEST',
+            'tags': ['speech recognition']
+        }
+    }
+
+    def all_formats(self):
+        return self._FORMAT_INFO
+
+    def __init__(self, config, project_dir, output_tags=None, upload_dir=None):
         self.project_dir = project_dir
+        self.upload_dir = upload_dir
         if isinstance(config, dict):
             self._schema = config
         elif isinstance(config, str):
@@ -71,8 +148,9 @@ class Converter(object):
     def convert(self, input_data, output_data, format, is_dir=True, **kwargs):
         if isinstance(format, str):
             format = Format.from_string(format)
+            
         if format == Format.JSON:
-            self.convert_to_json(input_data, output_data)
+            self.convert_to_json(input_data, output_data, is_dir=is_dir)
         elif format == Format.JSON_MIN:
             self.convert_to_json_min(input_data, output_data, is_dir=is_dir)
         elif format == Format.CSV:
@@ -91,17 +169,22 @@ class Converter(object):
         elif format == Format.YOLO:
             image_dir = kwargs.get('image_dir')
             label_dir = kwargs.get('label_dir')
-            self.convert_to_yolo(input_data, output_data, output_image_dir=image_dir, output_label_dir=label_dir,is_dir=is_dir)
+            self.convert_to_yolo(input_data, output_data, output_image_dir=image_dir,
+                                 output_label_dir=label_dir, is_dir=is_dir)
         elif format == Format.VOC:
             image_dir = kwargs.get('image_dir')
             self.convert_to_voc(input_data, output_data, output_image_dir=image_dir, is_dir=is_dir)
         elif format == Format.BRUSH_TO_NUMPY:
-            brush.convert_task_dir(input_data, output_data, out_format='numpy')
+            items = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
+            brush.convert_task_dir(items, output_data, out_format='numpy')
         elif format == Format.BRUSH_TO_PNG:
-            brush.convert_task_dir(input_data, output_data, out_format='png')
+            items = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
+            brush.convert_task_dir(items, output_data, out_format='png')
         elif format == Format.ASR_MANIFEST:
             items = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
-            convert_to_asr_json_manifest(items, output_data, data_key=self._data_keys[0], project_dir=self.project_dir)
+            convert_to_asr_json_manifest(
+                items, output_data, data_key=self._data_keys[0], project_dir=self.project_dir,
+                upload_dir=self.upload_dir)
 
     def _get_data_keys_and_output_tags(self, output_tags=None):
         data_keys = set()
@@ -139,10 +222,9 @@ class Converter(object):
         if not ('Image' in input_tag_types and ('RectangleLabels' in output_tag_types or
                                                 'PolygonLabels' in output_tag_types)):
             all_formats.remove(Format.COCO.name)
-        if not ('Image' in input_tag_types and 'BrushLabels' in output_tag_types):
+        if not ('Image' in input_tag_types and ('BrushLabels' in output_tag_types or 'brushlabels' in output_tag_types)):
             all_formats.remove(Format.BRUSH_TO_NUMPY.name)
             all_formats.remove(Format.BRUSH_TO_PNG.name)
-
         if not (('Audio' in input_tag_types or 'AudioPlus' in input_tag_types) and 'TextArea' in output_tag_types):
             all_formats.remove(Format.ASR_MANIFEST.name)
 
@@ -161,47 +243,65 @@ class Converter(object):
                     yield item
 
     def iter_from_json_file(self, json_file):
+        """ Extract annotation results from json file
+
+        param json_file: path to task list or dict with annotations
+        """
         with io.open(json_file, encoding='utf8') as f:
             data = json.load(f)
+            # one task
             if isinstance(data, Mapping):
-                yield self.load_from_dict(data)
+                for item in self.annotation_result_from_task(data):
+                    yield item
+
+            # many tasks
             elif isinstance(data, list):
-                for item in data:
-                    yield self.load_from_dict(item)
+                for task in data:
+                    for item in self.annotation_result_from_task(task):
+                        if item is not None:
+                            yield item
 
-    def load_from_dict(self, d):
-        if 'completions' not in d and 'result' not in d:
-            raise KeyError('Each completions dict item should contain "completions" or "result" key, '
+    def annotation_result_from_task(self, task):
+        has_annotations = 'completions' in task or 'annotations' in task
+        if not has_annotations:
+            raise KeyError('Each task dict item should contain "annotations" or "completions" [deprecated],'
                            'where value is list of dicts')
-        result = []
-        if 'completions' in d:
-            # get last not skipped completion and make result from it
-            tmp = list(
-                filter(lambda x: not (x.get('skipped', False) or x.get('was_cancelled', False)), d['completions']))
-            if len(tmp) > 0:
-                result = sorted(tmp, key=lambda x: x.get('created_at', 0), reverse=True)[0]['result']
-            else:
-                return None
 
-        elif 'result' in d:
-            result = d['result']
+        # get last not skipped completion and make result from it
+        annotations = task['annotations'] if 'annotations' in task else task['completions']
+        
+        # skip cancelled annotations
+        cancelled = lambda x: not (x.get('skipped', False) or x.get('was_cancelled', False))
+        annotations = list(filter(cancelled, annotations))
+        if not annotations:
+            return None
+        
+        # sort by creation time
+        annotations = sorted(annotations, key=lambda x: x.get('created_at', 0), reverse=True)
 
-        inputs = d['data']
-        outputs = defaultdict(list)
-        for r in result:
-            if 'from_name' in r and r['from_name'] in self._output_tags:
-                v = deepcopy(r['value'])
-                v['type'] = self._schema[r['from_name']]['type']
-                if 'original_width' in r:
-                    v['original_width'] = r['original_width']
-                if 'original_height' in r:
-                    v['original_height'] = r['original_height']
-                outputs[r['from_name']].append(v)
-        return {
-            'id': d['id'],
-            'input': inputs,
-            'output': outputs
-        }
+        for annotation in annotations:
+            inputs = task['data']
+            result = annotation['result']
+            outputs = defaultdict(list)
+
+            # get results only as output
+            for r in result:
+                if 'from_name' in r and r['from_name'] in self._output_tags:
+                    v = deepcopy(r['value'])
+                    v['type'] = self._schema[r['from_name']]['type']
+                    if 'original_width' in r:
+                        v['original_width'] = r['original_width']
+                    if 'original_height' in r:
+                        v['original_height'] = r['original_height']
+                    outputs[r['from_name']].append(v)
+
+            yield {
+                'id': task['id'],
+                'input': inputs,
+                'output': outputs,
+                'completed_by': annotation.get('completed_by', {}),
+                'annotation_id': annotation.get('id')
+            }
 
     def _check_format(self, fmt):
         pass
@@ -218,17 +318,19 @@ class Converter(object):
                 out.append(j)
         return out[0] if tag_type == 'Choices' and len(out) == 1 else out
 
-    def convert_to_json(self, input_dir, output_dir):
+    def convert_to_json(self, input_data, output_dir, is_dir=True):
         self._check_format(Format.JSON)
         ensure_dir(output_dir)
         output_file = os.path.join(output_dir, 'result.json')
         records = []
-        for json_file in glob(os.path.join(input_dir, '*.json')):
-            with io.open(json_file, encoding='utf8') as f:
-                records.append(json.load(f))
-
-        with io.open(output_file, mode='w', encoding='utf8') as fout:
-            json.dump(records, fout, indent=2, ensure_ascii=False)
+        if is_dir:
+            for json_file in glob(os.path.join(input_data, '*.json')):
+                with io.open(json_file, encoding='utf8') as f:
+                    records.append(json.load(f))
+            with io.open(output_file, mode='w', encoding='utf8') as fout:
+                json.dump(records, fout, indent=2, ensure_ascii=False)
+        else:
+            copy2(input_data, output_file)
 
     def convert_to_json_min(self, input_data, output_dir, is_dir=True):
         self._check_format(Format.JSON_MIN)
@@ -236,12 +338,15 @@ class Converter(object):
         output_file = os.path.join(output_dir, 'result.json')
         records = []
         item_iterator = self.iter_from_dir if is_dir else self.iter_from_json_file
+
         for item in item_iterator(input_data):
             record = deepcopy(item['input'])
             if item.get('id') is not None:
                 record['id'] = item['id']
             for name, value in item['output'].items():
                 record[name] = self._prettify(value)
+            record['annotator'] = item['completed_by'].get('email')
+            record['annotation_id'] = item['annotation_id']
             records.append(record)
 
         with io.open(output_file, mode='w', encoding='utf8') as fout:
@@ -253,6 +358,7 @@ class Converter(object):
         output_file = os.path.join(output_dir, 'result.csv')
         records = []
         item_iterator = self.iter_from_dir if is_dir else self.iter_from_json_file
+
         for item in item_iterator(input_data):
             record = deepcopy(item['input'])
             if item.get('id') is not None:
@@ -260,6 +366,8 @@ class Converter(object):
             for name, value in item['output'].items():
                 pretty_value = self._prettify(value)
                 record[name] = pretty_value if isinstance(pretty_value, str) else json.dumps(pretty_value)
+            record['annotator'] = item['completed_by'].get('email')
+            record['annotation_id'] = item['annotation_id']
             records.append(record)
 
         pd.DataFrame.from_records(records).to_csv(output_file, index=False, **kwargs)
@@ -297,13 +405,13 @@ class Converter(object):
         item_iterator = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
         for item_idx, item in enumerate(item_iterator):
             if not item['output']:
-                logger.warning('No completions found for item #' + str(item_idx))
+                logger.warning('No annotations found for item #' + str(item_idx))
                 continue
             image_path = item['input'][data_key]
             if not os.path.exists(image_path):
                 try:
                     image_path = download(image_path, output_image_dir, project_dir=self.project_dir,
-                                          return_relative_path=True)
+                                          return_relative_path=True, upload_dir=self.upload_dir)
                 except:
                     logger.error('Unable to download {image_path}. The item {item} will be skipped'.format(
                         image_path=image_path, item=item
@@ -354,7 +462,7 @@ class Converter(object):
                         'bbox': [x, y, w, h],
                         'ignore': 0,
                         'iscrowd': 0,
-                        'area': w * h
+                        'area': w * h,
                     })
                 elif "polygonlabels" in label:
                     points_abs = [(x / 100 * width, y / 100 * height) for x, y in label["points"]]
@@ -372,6 +480,9 @@ class Converter(object):
                     })
                 else:
                     raise ValueError("Unknown label type")
+
+                if os.getenv('LABEL_STUDIO_FORCE_ANNOTATOR_EXPORT'):
+                    annotations[-1].update({'annotator': item['completed_by'].get('email')})
 
         with io.open(output_file, mode='w', encoding='utf8') as fout:
             json.dump({
@@ -421,7 +532,6 @@ class Converter(object):
             if len(labels) == 0:
                 logger.error('Empty bboxes.')
                 continue
-            width, height = labels[0]['original_width'], labels[0]['original_height']
             label_path = os.path.join(output_label_dir, os.path.splitext(os.path.basename(image_path))[0]+'.txt')
             annotations =[]
             for label in labels:
@@ -487,7 +597,7 @@ class Converter(object):
         item_iterator = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
         for item_idx, item in enumerate(item_iterator):
             if not item['output']:
-                logger.warning('No completions found for item #' + str(item_idx))
+                logger.warning('No annotations found for item #' + str(item_idx))
                 continue
             image_path = item['input'][data_key]
             annotations_dir = os.path.join(output_dir, 'Annotations')
@@ -495,16 +605,18 @@ class Converter(object):
                 os.makedirs(annotations_dir)
             if not os.path.exists(image_path):
                 try:
-                    image_path = download(image_path, output_image_dir, project_dir=self.project_dir,
-                                          return_relative_path=True)
+                    image_path = download(
+                        image_path, output_image_dir, project_dir=self.project_dir,
+                        upload_dir=self.upload_dir, return_relative_path=True)
                 except:
                     logger.error('Unable to download {image_path}. The item {item} will be skipped'.format(
                         image_path=image_path, item=item), exc_info=True)
                     # On error, use default number of channels
                     channels = 3
                 else:
+                    full_image_path = os.path.join(output_image_dir, os.path.basename(image_path))
                     # retrieve number of channels from downloaded image
-                    _, _, channels = get_image_size_and_channels(image_path)
+                    _, _, channels = get_image_size_and_channels(full_image_path)
 
             bboxes = next(iter(item['output'].values()))
             if len(bboxes) == 0:
@@ -527,7 +639,9 @@ class Converter(object):
             create_child_node(doc, 'annotation', 'COCO2017', source_node)
             create_child_node(doc, 'image', 'flickr', source_node)
             create_child_node(doc, 'flickrid', 'NULL', source_node)
+            create_child_node(doc, 'annotator', item['completed_by'].get('email', 'none'), source_node)
             root_node.appendChild(source_node)
+
             owner_node = doc.createElement('owner')
             create_child_node(doc, 'flickrid', 'NULL', owner_node)
             create_child_node(doc, 'name', 'Label Studio', owner_node)
@@ -556,6 +670,7 @@ class Converter(object):
                 create_child_node(doc, 'ymin', str(y), bndbox_node)
                 create_child_node(doc, 'xmax', str(x + w), bndbox_node)
                 create_child_node(doc, 'ymax', str(y + h), bndbox_node)
+
                 object_node.appendChild(bndbox_node)
                 root_node.appendChild(object_node)
 
