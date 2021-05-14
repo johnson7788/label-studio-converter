@@ -169,8 +169,9 @@ class Converter(object):
         elif format == Format.YOLO:
             image_dir = kwargs.get('image_dir')
             label_dir = kwargs.get('label_dir')
+            labels = self._schema['label']['labels']
             self.convert_to_yolo(input_data, output_data, output_image_dir=image_dir,
-                                 output_label_dir=label_dir, is_dir=is_dir)
+                                 output_label_dir=label_dir, is_dir=is_dir, exist_labels=labels)
         elif format == Format.VOC:
             image_dir = kwargs.get('image_dir')
             self.convert_to_voc(input_data, output_data, output_image_dir=image_dir, is_dir=is_dir)
@@ -496,7 +497,7 @@ class Converter(object):
                 }
             }, fout, indent=2)
 
-    def convert_to_yolo(self, input_data, output_dir, output_image_dir=None, output_label_dir=None, is_dir=True):
+    def convert_to_yolo(self, input_data, output_dir, output_image_dir=None, output_label_dir=None, is_dir=True, exist_labels=None):
         self._check_format(Format.YOLO)
         ensure_dir(output_dir)
         notes_file = os.path.join(output_dir, 'notes.json')
@@ -511,8 +512,13 @@ class Converter(object):
         else:
             output_label_dir = os.path.join(output_dir, 'labels')
             os.makedirs(output_label_dir, exist_ok=True)
-        categories = []
-        category_name_to_id = {}
+        #可以使用已有的类别，那么顺序就固定了
+        if exist_labels:
+            categories = [{'id': idx, 'name': name} for idx, name in enumerate(exist_labels)]
+            category_name_to_id = {name:idx for idx, name in enumerate(exist_labels) }
+        else:
+            categories = []
+            category_name_to_id = {}
         data_key = self._data_keys[0]
         item_iterator = self.iter_from_dir(input_data) if is_dir else self.iter_from_json_file(input_data)
         for item_idx, item in enumerate(item_iterator):
